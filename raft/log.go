@@ -2,10 +2,10 @@ package raft
 
 import "context"
 
-// broadcastAppendEntries sends AppendEntries (heartbeat or with new
-// entries) to every peer in parallel. Called on every heartbeat tick
-// by heartbeatLoop, and should also be triggered immediately after
-// Propose appends a new entry (see the TODO in raft.go Propose).
+// fires off AppendEntries to every peer in parallel - either a real
+// batch of new entries or an empty heartbeat. called on every
+// heartbeat tick, and also right after Propose so a new write doesn't
+// have to wait around for the next tick.
 func (n *Node) broadcastAppendEntries() {
 	n.mu.Lock()
 	if n.role != Leader {
@@ -22,32 +22,32 @@ func (n *Node) broadcastAppendEntries() {
 	}
 }
 
-// replicateToPeer sends this leader's view of the log starting at
-// nextIndex[peer] to a single follower, and reconciles the reply.
-//
-// TODO(core): this is the heart of log replication and is currently
-// unimplemented beyond the RPC plumbing. You need to:
-//  1. Read nextIndex[peer] (locked) to compute prevLogIndex/prevLogTerm
-//     and the slice of entries to send (everything from nextIndex
-//     onward - may be empty, i.e. a pure heartbeat).
-//  2. On success: advance matchIndex[peer] and nextIndex[peer] to
-//     reflect what was just replicated, then call
-//     advanceCommitIndexLocked() since a majority match might have
-//     just been reached.
-//  3. On failure due to log inconsistency (reply.Success == false but
-//     same term): decrement nextIndex[peer] and retry - or better,
-//     use reply.ConflictIndex/ConflictTerm to jump back directly to
-//     the follower's actual divergence point (Raft §5.3, "fast
-//     backtracking") instead of one entry at a time.
-//  4. On a reply with a higher term: step down via
-//     becomeFollowerLocked and stop - you're not the leader anymore.
+// sends whatever a single follower needs to catch up, starting at
+// nextIndex[peer], and reconciles the reply. this is where most of
+// the actual "make replication converge" logic lives.
 func (n *Node) replicateToPeer(peer PeerID, term uint64, leaderCommit uint64) {
 	n.mu.Lock()
+	if n.role != Leader || n.currentTerm != term {
+		n.mu.Unlock()
+		return
+	}
+
+	// if I've already compacted away the entries this follower needs,
+	// a snapshot is the only way to get it caught up
+	if n.nextIndex[peer] <= n.log.lastIncludedIndex {
+		n.mu.Unlock()
+		n.sendInstallSnapshot(peer)
+		return
+	}
+
 	prevLogIndex := n.nextIndex[peer] - 1
-	prevLogTerm := uint64(0)
-	if e, ok := n.log.at(prevLogIndex); ok {
+	var prevLogTerm uint64
+	if prevLogIndex == n.log.lastIncludedIndex {
+		prevLogTerm = n.log.lastIncludedTerm
+	} else if e, ok := n.log.at(prevLogIndex); ok {
 		prevLogTerm = e.Term
 	}
+
 	var entries []LogEntry
 	for idx := n.nextIndex[peer]; idx <= n.log.lastIndex(); idx++ {
 		if e, ok := n.log.at(idx); ok {
@@ -59,7 +59,7 @@ func (n *Node) replicateToPeer(peer PeerID, term uint64, leaderCommit uint64) {
 	ctx, cancel := context.WithTimeout(context.Background(), HeartbeatInterval*2)
 	defer cancel()
 
-	_, err := n.transport.SendAppendEntries(ctx, peer, &AppendEntriesArgs{
+	reply, err := n.transport.SendAppendEntries(ctx, peer, &AppendEntriesArgs{
 		Term:         term,
 		LeaderID:     n.id,
 		PrevLogIndex: prevLogIndex,
@@ -68,18 +68,57 @@ func (n *Node) replicateToPeer(peer PeerID, term uint64, leaderCommit uint64) {
 		LeaderCommit: leaderCommit,
 	})
 	if err != nil {
+		return // couldn't reach it this round, next heartbeat tick will retry
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.role != Leader || n.currentTerm != term {
+		return // I'm not in charge of this term anymore, none of this matters
+	}
+
+	if reply.Term > n.currentTerm {
+		n.becomeFollowerLocked(reply.Term)
 		return
 	}
 
-	// TODO(core): see doc comment above - the reply is currently
-	// discarded, so nextIndex/matchIndex never advance and
-	// commitIndex never moves past whatever a majority already had
-	// when the leader was elected.
+	if reply.Success {
+		matched := prevLogIndex + uint64(len(entries))
+		if matched > n.matchIndex[peer] {
+			n.matchIndex[peer] = matched
+			n.nextIndex[peer] = matched + 1
+			n.advanceCommitIndexLocked()
+		}
+		return
+	}
+
+	// follower rejected me - use its conflict hint to jump back to
+	// roughly the right spot instead of decrementing nextIndex one
+	// entry at a time, which gets painfully slow on a long divergence
+	if reply.ConflictTerm == 0 {
+		// its log just doesn't reach PrevLogIndex yet
+		n.nextIndex[peer] = reply.ConflictIndex
+	} else {
+		// see if I've got anything from ConflictTerm myself - if so,
+		// retry right after the last entry I have in that term
+		next := reply.ConflictIndex
+		for idx := n.log.lastIndex(); idx > n.log.lastIncludedIndex; idx-- {
+			if e, ok := n.log.at(idx); ok && e.Term == reply.ConflictTerm {
+				next = idx + 1
+				break
+			}
+		}
+		n.nextIndex[peer] = next
+	}
+	if n.nextIndex[peer] < 1 {
+		n.nextIndex[peer] = 1
+	}
 }
 
-// HandleAppendEntries implements the AppendEntries RPC (Raft §5.3,
-// Figure 2), called by a follower when its leader sends a heartbeat
-// or new entries.
+// the AppendEntries handler, called on a follower when its leader
+// sends a heartbeat or new entries. this is Figure 2's consistency
+// check plus the merge.
 func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -94,38 +133,101 @@ func (n *Node) HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply 
 	if args.Term > n.currentTerm {
 		n.becomeFollowerLocked(args.Term)
 	}
-	// A valid AppendEntries from the current term's leader means this
-	// node should not start its own election.
+	// a legit AppendEntries from the current leader means I shouldn't
+	// be trying to start my own election right now
 	n.role = Follower
+	n.leaderHint = args.LeaderID
 	n.resetElectionTimer()
 	reply.Term = n.currentTerm
 
-	// TODO(core): implement the log consistency check and merge,
-	// Figure 2 steps 2-5:
-	//  1. Reply false if log doesn't contain an entry at
-	//     PrevLogIndex whose term matches PrevLogTerm (set
-	//     ConflictIndex/ConflictTerm to help the leader backtrack
-	//     fast - see log.go replicateToPeer TODO #3).
-	//  2. If an existing entry conflicts with a new one (same index,
-	//     different term), delete it and everything after it
-	//     (log.truncateFrom).
-	//  3. Append any new entries not already in the log.
-	//  4. If LeaderCommit > commitIndex, set commitIndex =
-	//     min(LeaderCommit, index of last new entry) - this is what
-	//     lets applyLoop start delivering entries to the state
-	//     machine.
-	reply.Success = false
+	// my log doesn't even reach PrevLogIndex yet
+	if args.PrevLogIndex > n.log.lastIndex() {
+		reply.Success = false
+		reply.ConflictIndex = n.log.lastIndex() + 1
+		reply.ConflictTerm = 0
+		return reply
+	}
+
+	// I've got PrevLogIndex, but from a different term - I'm on a
+	// branch of history that diverges from the leader's
+	if args.PrevLogIndex > n.log.lastIncludedIndex {
+		if e, ok := n.log.at(args.PrevLogIndex); ok && e.Term != args.PrevLogTerm {
+			conflictTerm := e.Term
+			conflictIndex := args.PrevLogIndex
+			for idx := args.PrevLogIndex; idx > n.log.lastIncludedIndex; idx-- {
+				entry, ok := n.log.at(idx)
+				if !ok || entry.Term != conflictTerm {
+					break
+				}
+				conflictIndex = idx
+			}
+			reply.Success = false
+			reply.ConflictIndex = conflictIndex
+			reply.ConflictTerm = conflictTerm
+			return reply
+		}
+	} else if args.PrevLogIndex == n.log.lastIncludedIndex && n.log.lastIncludedIndex > 0 && args.PrevLogTerm != n.log.lastIncludedTerm {
+		// PrevLogIndex lands right on my snapshot boundary and the
+		// terms don't line up - shouldn't come up in practice but I'd
+		// rather reject than silently accept something wrong
+		reply.Success = false
+		reply.ConflictIndex = args.PrevLogIndex
+		reply.ConflictTerm = args.PrevLogTerm
+		return reply
+	}
+
+	// merge: keep what already matches, overwrite what doesn't,
+	// append what's new
+	for i, entry := range args.Entries {
+		idx := args.PrevLogIndex + uint64(i) + 1
+		if existing, ok := n.log.at(idx); ok {
+			if existing.Term != entry.Term {
+				n.log.truncateFrom(idx)
+				n.log.append(entry)
+			}
+		} else {
+			n.log.append(entry)
+		}
+	}
+	n.persistLocked()
+
+	if args.LeaderCommit > n.commitIndex {
+		lastNew := args.PrevLogIndex + uint64(len(args.Entries))
+		if args.LeaderCommit < lastNew {
+			n.commitIndex = args.LeaderCommit
+		} else {
+			n.commitIndex = lastNew
+		}
+	}
+
+	reply.Success = true
 	return reply
 }
 
-// advanceCommitIndexLocked recomputes commitIndex from matchIndex
-// once replication progress changes. Must be called with n.mu held.
-//
-// TODO(core): find the highest N such that N > commitIndex, a
-// majority of matchIndex[peer] >= N (plus the leader's own log, which
-// implicitly "matches" itself up to lastIndex), AND log[N].Term ==
-// currentTerm (the term-matching requirement is what the no-op-entry
-// TODO in election.go exists to satisfy - see Raft §5.4.2). If found,
-// set n.commitIndex = N.
+// recomputes commitIndex from matchIndex after a successful
+// replication. must be called with n.mu already held. walking down
+// from the top means the first index I find that qualifies is the
+// highest one, so I can stop right there.
 func (n *Node) advanceCommitIndexLocked() {
+	for idx := n.log.lastIndex(); idx > n.commitIndex; idx-- {
+		entry, ok := n.log.at(idx)
+		if !ok || entry.Term != n.currentTerm {
+			// §5.4.2 / Figure 8: I can only commit an entry directly
+			// if it's from my own term. older entries only get
+			// committed as a side effect of a same-term entry above
+			// them getting a majority.
+			continue
+		}
+
+		count := 1 // I've got it, I'm the leader
+		for _, p := range n.peers {
+			if n.matchIndex[p] >= idx {
+				count++
+			}
+		}
+		if count*2 > len(n.peers)+1 {
+			n.commitIndex = idx
+			return
+		}
+	}
 }

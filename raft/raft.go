@@ -6,16 +6,12 @@ import (
 	"time"
 )
 
-// Node is a single Raft cluster member. It owns the persistent and
-// volatile state described in Raft Figure 2, drives the
-// election/heartbeat timers, and exposes Propose for the KV server to
-// submit new commands.
-//
-// All mutable fields are guarded by mu. RPC handlers (election.go,
-// log.go, snapshot.go) and the background loop (run) all take the
-// lock before touching state, and release it before making any
-// network call - holding a lock across an RPC is how you deadlock a
-// Raft cluster.
+// one cluster member. everything mutable lives behind mu - RPC
+// handlers, the background loops, all of it takes the lock before
+// touching state and drops it before making any network call. I
+// learned the hard way (well, in theory - read enough Raft postmortems)
+// that holding a lock across an RPC is the easiest way to deadlock a
+// whole cluster, so nothing in here does that.
 type Node struct {
 	mu sync.Mutex
 
@@ -25,27 +21,30 @@ type Node struct {
 	persister Persister
 	applyCh   chan ApplyMsg
 
-	// --- persistent state (Figure 2) ---
+	// persistent state, Figure 2
 	currentTerm uint64
-	votedFor    PeerID // "" if none
+	votedFor    PeerID
 	log         *log
 
-	// --- volatile state, all nodes ---
+	// volatile, every node
 	role        Role
 	commitIndex uint64
 	lastApplied uint64
 
-	// --- volatile state, leaders only (reinitialized on election) ---
+	// volatile, leader only - reset every time I win an election
 	nextIndex  map[PeerID]uint64
 	matchIndex map[PeerID]uint64
 
-	electionReset chan struct{} // signals "we heard from a valid leader/candidate, reset the timer"
+	// last leader I heard a real heartbeat from, so clients hitting
+	// the wrong node can be pointed somewhere useful instead of
+	// guessing (see client/client.go)
+	leaderHint PeerID
+
+	electionReset chan struct{}
 	stopCh        chan struct{}
+	stopOnce      sync.Once
 }
 
-// NewNode constructs a Node for cfg.Self. It does not start any
-// goroutines; call Run in its own goroutine to begin participating in
-// the cluster.
 func NewNode(cfg Config, transport Transport, persister Persister, applyCh chan ApplyMsg) *Node {
 	n := &Node{
 		id:            cfg.Self,
@@ -66,25 +65,40 @@ func NewNode(cfg Config, transport Transport, persister Persister, applyCh chan 
 		n.votedFor = votedFor
 		n.log.entries = entries
 	}
+	if data, lastIncludedIndex, lastIncludedTerm, err := persister.LoadSnapshot(); err == nil {
+		n.log.lastIncludedIndex = lastIncludedIndex
+		n.log.lastIncludedTerm = lastIncludedTerm
+		if n.commitIndex < lastIncludedIndex {
+			n.commitIndex = lastIncludedIndex
+		}
+		if n.lastApplied < lastIncludedIndex {
+			n.lastApplied = lastIncludedIndex
+		}
+		// the state machine itself picks this up off applyCh once Run
+		// starts - queuing it here so it's the very first thing that
+		// goes out
+		go func() {
+			n.applyCh <- ApplyMsg{SnapshotValid: true, Snapshot: data, SnapshotIndex: lastIncludedIndex, SnapshotTerm: lastIncludedTerm}
+		}()
+	}
 
 	return n
 }
 
-// Run drives the node's timers until Stop is called. It must be
-// started in its own goroutine.
+// starts the three background loops. call it once, in its own
+// goroutine (or just `go node.Run()`).
 func (n *Node) Run() {
 	go n.electionTimerLoop()
 	go n.heartbeatLoop()
 	go n.applyLoop()
 }
 
+// safe to call more than once - a test killing a node it already
+// killed shouldn't panic on a double close.
 func (n *Node) Stop() {
-	close(n.stopCh)
+	n.stopOnce.Do(func() { close(n.stopCh) })
 }
 
-// electionTimerLoop fires startElection whenever ElectionTimeout
-// elapses without electionReset being pinged (i.e. without hearing a
-// valid heartbeat/vote request from a legitimate leader/candidate).
 func (n *Node) electionTimerLoop() {
 	for {
 		timeout := randomElectionTimeout()
@@ -104,9 +118,6 @@ func (n *Node) electionTimerLoop() {
 	}
 }
 
-// heartbeatLoop sends AppendEntries (possibly empty, i.e. a
-// heartbeat) to every peer at a fixed interval whenever this node
-// believes it is the leader.
 func (n *Node) heartbeatLoop() {
 	ticker := time.NewTicker(HeartbeatInterval)
 	defer ticker.Stop()
@@ -125,9 +136,10 @@ func (n *Node) heartbeatLoop() {
 	}
 }
 
-// applyLoop pushes committed-but-not-yet-applied entries onto applyCh
-// in order. See log.go advanceCommitIndex for how commitIndex moves
-// forward.
+// pushes anything between lastApplied and commitIndex onto applyCh,
+// in order. I poll instead of using a condition variable here - it's
+// simpler and 10ms of latency on applying a committed entry has never
+// mattered for anything I've tested against.
 func (n *Node) applyLoop() {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
@@ -157,17 +169,15 @@ func (n *Node) applyLoop() {
 	}
 }
 
-// Propose appends cmd to the log if this node is currently the
-// leader. It returns immediately after appending locally; the caller
-// (server/server.go) must wait for the entry to reach commitIndex
-// (delivered via applyCh) before responding to the client - Raft only
-// guarantees an entry survives once it is committed, not once it is
-// merely appended by a leader that may lose the next election.
+// appends cmd to my log if I'm currently the leader. returns right
+// after the local append - the caller (server/server.go) has to wait
+// for the entry to actually reach commitIndex before telling a client
+// it succeeded. appending locally is cheap and reversible; committed
+// is the only thing Raft actually promises will stick.
 func (n *Node) Propose(cmd []byte) (index uint64, term uint64, isLeader bool) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
-
 	if n.role != Leader {
+		n.mu.Unlock()
 		return 0, 0, false
 	}
 
@@ -178,11 +188,12 @@ func (n *Node) Propose(cmd []byte) (index uint64, term uint64, isLeader bool) {
 	}
 	n.log.append(entry)
 	n.persistLocked()
+	n.mu.Unlock()
 
-	// TODO(replication): appending locally isn't enough to make
-	// progress before the next heartbeat tick - kick an immediate
-	// replication round here instead of waiting up to
-	// HeartbeatInterval for the periodic broadcast in log.go.
+	// don't wait for the next heartbeat tick to let everyone know -
+	// kick replication off right away so a client isn't sitting
+	// around for up to HeartbeatInterval for no reason
+	go n.broadcastAppendEntries()
 
 	return entry.Index, entry.Term, true
 }
@@ -193,16 +204,10 @@ func (n *Node) State() (term uint64, isLeader bool) {
 	return n.currentTerm, n.role == Leader
 }
 
-// LeaderHint returns the id of the peer this node most recently
-// believed to be leader, so a client hitting the wrong node can be
-// redirected without guessing. Returns "" if unknown.
-//
-// TODO: track this explicitly (e.g. set from the leaderId field on
-// every AppendEntries this node accepts) - currently unimplemented,
-// which means clients fall back to round-robin retry against the
-// full peer list. See client/client.go.
 func (n *Node) LeaderHint() PeerID {
-	return ""
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.leaderHint
 }
 
 func (n *Node) persistLocked() {
