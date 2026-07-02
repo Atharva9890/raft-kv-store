@@ -1,12 +1,13 @@
-// Package tests exercises raft.Node in-process, over an in-memory
-// fake network instead of gRPC. That's what makes it possible to
-// simulate a network partition or a node crash in a few lines and
-// run the whole suite in milliseconds - no docker-compose required.
+// I exercise raft.Node in-process here, over an in-memory fake
+// network instead of real gRPC. That's what lets me simulate a
+// partition or a node crash in a couple lines and run the whole suite
+// in a few seconds instead of needing docker-compose running.
 //
-// Every test in this package is a target, not a given: against the
-// unmodified scaffold (election.go/log.go/snapshot.go TODOs still
-// unimplemented) these tests are expected to FAIL or time out. That's
-// intentional - they define what "done" looks like.
+// these tests are what I actually trust to tell me if the Raft
+// implementation is correct - go test ./tests/... is my ground truth,
+// more than "it worked when I tried it manually." if I ever rewrite
+// election.go/log.go/snapshot.go from scratch, this is the suite that
+// has to pass again before I believe it.
 package tests
 
 import (
@@ -136,6 +137,7 @@ type cluster struct {
 
 	mu      sync.Mutex
 	applied map[raft.PeerID][]raft.ApplyMsg
+	dead    map[raft.PeerID]bool
 }
 
 // newCluster builds n nodes named "node1".."nodeN", fully connected,
@@ -154,6 +156,7 @@ func newCluster(t *testing.T, n int) *cluster {
 		net:     newFakeNetwork(),
 		nodes:   make(map[raft.PeerID]*raft.Node),
 		applied: make(map[raft.PeerID][]raft.ApplyMsg),
+		dead:    make(map[raft.PeerID]bool),
 	}
 
 	for id := range peers {
@@ -186,12 +189,39 @@ func (c *cluster) stop() {
 	}
 }
 
-// leaders returns the ids of every node that currently believes it is
-// the leader. In a correct implementation this should never have more
-// than one member for a given term.
+// markDead excludes id from leaders()/waitForLeader() from here on.
+// I need this because "crashing" a node in the harness (see crash()
+// in failure_test.go) only stops its goroutines and cuts its network
+// - the in-process Node object is still sitting right there and its
+// last-known role field never gets updated again, so it'll answer
+// State() with whatever it believed right before it died. A real
+// crashed process can't answer at all, so I don't let the fake one
+// either once it's marked dead.
+func (c *cluster) markDead(id raft.PeerID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.dead[id] = true
+}
+
+// every node that currently believes it's the leader, excluding dead
+// ones. worth remembering this can legitimately return more than one
+// id during a partition: a leader stuck on the minority side has no
+// way of knowing it's been deposed until it either reconnects or
+// tries to commit something and fails to reach a majority. that's not
+// a bug, it's why waitForLeaderAmong exists below.
 func (c *cluster) leaders() []raft.PeerID {
+	c.mu.Lock()
+	dead := make(map[raft.PeerID]bool, len(c.dead))
+	for id := range c.dead {
+		dead[id] = true
+	}
+	c.mu.Unlock()
+
 	var ids []raft.PeerID
 	for id, n := range c.nodes {
+		if dead[id] {
+			continue
+		}
 		if _, isLeader := n.State(); isLeader {
 			ids = append(ids, id)
 		}
@@ -199,8 +229,9 @@ func (c *cluster) leaders() []raft.PeerID {
 	return ids
 }
 
-// waitForLeader polls until exactly one leader emerges or timeout
-// elapses, failing the test on timeout.
+// waitForLeader polls until exactly one leader emerges cluster-wide.
+// only meaningful when the cluster isn't currently split by a
+// partition - see waitForLeaderAmong for that case.
 func (c *cluster) waitForLeader(timeout time.Duration) raft.PeerID {
 	c.t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -214,9 +245,65 @@ func (c *cluster) waitForLeader(timeout time.Duration) raft.PeerID {
 	return ""
 }
 
+// same idea, but scoped to a subset of nodes - what I actually want
+// when checking "did the majority side elect someone" while a
+// partitioned-off former leader is still out there insisting it's in
+// charge.
+func (c *cluster) waitForLeaderAmong(ids []raft.PeerID, timeout time.Duration) raft.PeerID {
+	c.t.Helper()
+	want := make(map[raft.PeerID]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		var found []raft.PeerID
+		for _, id := range c.leaders() {
+			if want[id] {
+				found = append(found, id)
+			}
+		}
+		if len(found) == 1 {
+			return found[0]
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	c.t.Fatalf("no single leader elected among %v within %s", ids, timeout)
+	return ""
+}
+
 // appliedCount returns how many entries node id has applied so far.
 func (c *cluster) appliedCount(id raft.PeerID) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.applied[id])
+}
+
+// hasSnapshot reports whether id has ever received a SnapshotValid
+// ApplyMsg - i.e. it caught up via InstallSnapshot rather than plain
+// AppendEntries.
+func (c *cluster) hasSnapshot(id raft.PeerID) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, msg := range c.applied[id] {
+		if msg.SnapshotValid {
+			return true
+		}
+	}
+	return false
+}
+
+// generic poll-until helper for the handful of things above that
+// don't fit waitForLeader/waitForLeaderAmong.
+func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("condition not met within %s", timeout)
 }

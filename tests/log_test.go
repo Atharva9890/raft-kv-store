@@ -5,14 +5,9 @@ import (
 	"time"
 )
 
-// TestProposedEntryReplicatesToAllNodes checks the core log
-// replication promise: once the leader commits an entry, every node
-// in the cluster eventually applies it - not just the leader.
-//
-// Fails on the unmodified scaffold because replicateToPeer() in
-// raft/log.go never advances nextIndex/matchIndex or calls
-// advanceCommitIndexLocked, so commitIndex never moves and applyLoop
-// has nothing to deliver.
+// the core replication promise: once the leader commits something,
+// every node in the cluster eventually applies it, not just the
+// leader.
 func TestProposedEntryReplicatesToAllNodes(t *testing.T) {
 	c := newCluster(t, 3)
 	defer c.stop()
@@ -44,11 +39,7 @@ func TestProposedEntryReplicatesToAllNodes(t *testing.T) {
 	t.Fatalf("not all nodes applied the proposed entry within the deadline")
 }
 
-// TestFollowerRejectsProposals checks that only the leader accepts
-// writes - a correctness property that's actually already
-// implemented (see raft.Node.Propose), so this test should pass even
-// on the unmodified scaffold. If it doesn't, something more basic
-// than the TODOs is broken.
+// only the leader should ever accept a write.
 func TestFollowerRejectsProposals(t *testing.T) {
 	c := newCluster(t, 3)
 	defer c.stop()

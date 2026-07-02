@@ -7,13 +7,8 @@ import (
 	"github.com/Atharva9890/raft-kv-store/raft"
 )
 
-// TestSingleLeaderElected is the most basic possible Raft correctness
-// property: give a healthy 3-node cluster enough time, and exactly
-// one node should become leader.
-//
-// Fails on the unmodified scaffold because startElection() in
-// raft/election.go never actually counts votes or calls
-// becomeLeaderLocked.
+// most basic thing I could ask of this: give a healthy 3-node cluster
+// a couple seconds and exactly one of them should end up leader.
 func TestSingleLeaderElected(t *testing.T) {
 	c := newCluster(t, 3)
 	defer c.stop()
@@ -21,10 +16,15 @@ func TestSingleLeaderElected(t *testing.T) {
 	c.waitForLeader(2 * time.Second)
 }
 
-// TestReElectionAfterLeaderCrash checks that once a leader is elected
-// and then partitioned away from the rest of the cluster (simulating
-// a crash - it can no longer send heartbeats or receive votes), the
-// remaining majority elects a new leader on its own.
+// partition the leader away from everyone else (no network access at
+// all, in either direction) and check the remaining 4 nodes elect
+// someone new on their own. I'm using waitForLeaderAmong scoped to
+// "rest" here instead of the plain global waitForLeader, because the
+// old leader doesn't actually know it's been cut off - it just keeps
+// blasting heartbeats into the void and, as far as its own state
+// goes, still thinks it's in charge. that's correct Raft behavior,
+// not a bug, so the test has to account for it instead of asserting
+// cluster-wide uniqueness.
 func TestReElectionAfterLeaderCrash(t *testing.T) {
 	c := newCluster(t, 5)
 	defer c.stop()
@@ -39,7 +39,7 @@ func TestReElectionAfterLeaderCrash(t *testing.T) {
 	}
 	c.net.Partition([]raft.PeerID{first}, rest)
 
-	second := c.waitForLeader(2 * time.Second)
+	second := c.waitForLeaderAmong(rest, 2*time.Second)
 	if second == first {
 		t.Fatalf("expected a new leader after partitioning away %s, got the same leader back", first)
 	}
