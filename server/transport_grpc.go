@@ -12,11 +12,12 @@ import (
 	"github.com/Atharva9890/raft-kv-store/raft"
 )
 
-// GRPCTransport implements raft.Transport over gRPC, lazily dialing
-// and caching one connection per peer. This is the only place raft/
-// touches the network - everything in raft/ talks to the
-// raft.Transport interface so it can be unit tested against an
-// in-memory fake instead (see tests/).
+// the real raft.Transport, over gRPC - dials each peer lazily and
+// caches the connection. this is the only spot in the whole project
+// where raft/ actually touches a network, since everything in there
+// only ever talks to the Transport interface. that's also what lets
+// tests/ swap in an in-memory fake and run the whole suite without
+// gRPC in the loop at all.
 type GRPCTransport struct {
 	addrs map[raft.PeerID]string
 

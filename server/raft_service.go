@@ -7,11 +7,11 @@ import (
 	"github.com/Atharva9890/raft-kv-store/raft"
 )
 
-// RaftService adapts the internal peer-to-peer gRPC service
-// (proto/kv.proto's Raft service) onto a raft.Node's exported
-// Handle* methods. Kept separate from Server (the client-facing KV
-// service) because they're registered on the same gRPC listener but
-// conceptually serve different audiences - clients vs. cluster peers.
+// adapts the internal peer-to-peer gRPC service (the Raft service in
+// proto/kv.proto) onto a raft.Node's Handle* methods. I kept this
+// separate from Server (the client-facing KV service) because even
+// though they share a listener, they're serving completely different
+// audiences - clients vs. other cluster members.
 type RaftService struct {
 	kvpb.UnimplementedRaftServer
 	node *raft.Node

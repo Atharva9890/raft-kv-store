@@ -4,9 +4,9 @@ package kv;
 
 option go_package = "github.com/Atharva9890/raft-kv-store/proto/kvpb";
 
-// KV is the client-facing service. Every RPC must be served by the
-// current leader; followers respond with NotLeader so the client can
-// redirect.
+// client-facing service. every RPC has to be served by the current
+// leader - followers reply with not_leader so the client knows to
+// redirect instead of getting a wrong answer.
 service KV {
   rpc Get(GetRequest) returns (GetResponse);
   rpc Put(PutRequest) returns (PutResponse);
@@ -45,8 +45,8 @@ message DeleteResponse {
   bool not_leader = 3;
 }
 
-// Raft is the internal server-to-server protocol between cluster
-// members. Clients never call this service directly.
+// internal peer-to-peer protocol between cluster members. clients
+// never call this directly.
 service Raft {
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
@@ -68,7 +68,7 @@ message RequestVoteResponse {
 message LogEntry {
   uint64 term = 1;
   uint64 index = 2;
-  bytes command = 3; // opaque payload, decoded by the state machine
+  bytes command = 3; // opaque to raft itself, decoded by whatever's on the other end of applyCh
 }
 
 message AppendEntriesRequest {
@@ -76,16 +76,16 @@ message AppendEntriesRequest {
   string leader_id = 2;
   uint64 prev_log_index = 3;
   uint64 prev_log_term = 4;
-  repeated LogEntry entries = 5; // empty = heartbeat
+  repeated LogEntry entries = 5; // empty = just a heartbeat
   uint64 leader_commit = 6;
 }
 
 message AppendEntriesResponse {
   uint64 term = 1;
   bool success = 2;
-  // Fast backtracking hints (see raft/log.go TODOs) so a leader can
-  // skip straight to the follower's real divergence point instead of
-  // decrementing nextIndex one entry at a time.
+  // conflict_index/conflict_term let the leader jump straight to
+  // where a follower's log actually diverges instead of decrementing
+  // nextIndex one entry at a time - see replicateToPeer in raft/log.go.
   uint64 conflict_index = 3;
   uint64 conflict_term = 4;
 }
@@ -95,7 +95,7 @@ message InstallSnapshotRequest {
   string leader_id = 2;
   uint64 last_included_index = 3;
   uint64 last_included_term = 4;
-  bytes data = 5; // full state machine snapshot, sent in one shot
+  bytes data = 5; // the whole state machine snapshot, sent in one shot
 }
 
 message InstallSnapshotResponse {

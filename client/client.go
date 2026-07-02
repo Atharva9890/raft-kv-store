@@ -11,16 +11,16 @@ import (
 	"github.com/Atharva9890/raft-kv-store/proto/kvpb"
 )
 
-// Client is a minimal KV client that doesn't know or care which node
-// is the current leader. Every operation tries the node it last had
-// success with; on a NotLeader response it follows the LeaderHint if
-// one was given, and otherwise round-robins through the rest of the
-// cluster until something answers authoritatively.
+// a minimal KV client that doesn't know or care which node is
+// currently the leader. every call tries whichever node it last had
+// success with; on a NotLeader reply it follows the LeaderHint if the
+// server gave one, otherwise it just moves down the list until
+// something answers for real.
 //
-// This "try, get redirected, retry" loop is the client-side half of
-// how a Raft-backed service stays available through elections: no
-// service discovery, no external coordinator - just retry against the
-// cluster you were given.
+// this "try, get redirected, retry" dance is the whole client-side
+// story for staying available through an election - no service
+// discovery, no external coordinator, just retry against the cluster
+// you were handed.
 type Client struct {
 	addrs      []string
 	leaderIdx  int
@@ -83,11 +83,12 @@ func (c *Client) Delete(key string) error {
 	})
 }
 
-// withRetry tries call against the current best-guess leader. If call
-// reports NotLeader, it moves on to the hinted address (if the leader
-// told us who it is) or simply the next node in the list, and tries
-// again - this is what makes "kill the leader, client keeps working"
-// work without any change to the calling code.
+// tries call against my current best guess at the leader. if call
+// reports NotLeader, I move to the hinted address (when the node
+// bothered to tell me who it thinks the leader is) or just the next
+// node in the list, then try again - this is what makes "kill the
+// leader, client keeps working" true without the caller changing
+// anything.
 func (c *Client) withRetry(call func(kvpb.KVClient, context.Context) (ok bool, hint string, err error)) error {
 	var lastErr error
 	for attempt := 0; attempt < c.maxRetries; attempt++ {

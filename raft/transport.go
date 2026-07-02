@@ -2,10 +2,10 @@ package raft
 
 import "context"
 
-// RequestVoteArgs/Reply, AppendEntriesArgs/Reply and
-// InstallSnapshotArgs/Reply mirror the generated protobuf messages
-// (proto/kvpb) but stay transport-agnostic so raft/ has no gRPC
-// import and can be unit tested with an in-memory Transport.
+// these mirror the protobuf messages in proto/kvpb almost field for
+// field, but I kept them as plain structs so raft/ doesn't need to
+// import gRPC at all. that's what lets tests/ swap in an in-memory
+// fake transport and run the whole suite without a real network.
 type RequestVoteArgs struct {
 	Term         uint64
 	CandidateID  PeerID
@@ -28,8 +28,11 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term          uint64
-	Success       bool
+	Term    uint64
+	Success bool
+	// ConflictIndex/ConflictTerm let the leader skip straight to where
+	// my log actually diverges instead of retrying one index at a
+	// time - see the backoff logic in log.go replicateToPeer.
 	ConflictIndex uint64
 	ConflictTerm  uint64
 }
@@ -46,10 +49,9 @@ type InstallSnapshotReply struct {
 	Term uint64
 }
 
-// Transport sends RPCs to a named peer. server/ provides a gRPC
-// implementation (server/transport_grpc.go); tests/ provides an
-// in-memory implementation that can drop/delay/partition messages
-// without spinning up real network sockets.
+// anything that can carry these three RPCs to a named peer. server/
+// has the real gRPC implementation, tests/ has an in-memory one that
+// can drop/partition messages on command.
 type Transport interface {
 	SendRequestVote(ctx context.Context, peer PeerID, args *RequestVoteArgs) (*RequestVoteReply, error)
 	SendAppendEntries(ctx context.Context, peer PeerID, args *AppendEntriesArgs) (*AppendEntriesReply, error)

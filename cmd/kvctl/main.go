@@ -1,7 +1,7 @@
-// Command kvctl is a tiny CLI wrapper around client.Client, mostly
-// useful for the docker-compose demo: `kvctl put foo bar`, kill the
-// leader's container, then `kvctl get foo` again to watch a new
-// leader answer without you changing the command.
+// tiny CLI wrapper around client.Client. mostly for the compose demo:
+// `kvctl put foo bar`, kill the leader's container, then `kvctl get
+// foo` again and watch a new leader answer without changing the
+// command at all.
 package main
 
 import (
@@ -65,7 +65,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: kvctl get <key> | put <key> <value> | delete <key>")
-	fmt.Fprintln(os.Stderr, "cluster addresses come from KVCTL_ADDRS (comma-separated host:port), default is the 5-node docker-compose cluster")
+	fmt.Fprintln(os.Stderr, "cluster addresses come from KVCTL_ADDRS (comma-separated host:port), defaults to my 5-node compose cluster")
 }
 
 func fatal(err error) {

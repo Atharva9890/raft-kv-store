@@ -473,7 +473,7 @@ type LogEntry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Term          uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
 	Index         uint64                 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`
-	Command       []byte                 `protobuf:"bytes,3,opt,name=command,proto3" json:"command,omitempty"` // opaque payload, decoded by the state machine
+	Command       []byte                 `protobuf:"bytes,3,opt,name=command,proto3" json:"command,omitempty"` // opaque to raft itself, decoded by whatever's on the other end of applyCh
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -535,7 +535,7 @@ type AppendEntriesRequest struct {
 	LeaderId      string                 `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
 	PrevLogIndex  uint64                 `protobuf:"varint,3,opt,name=prev_log_index,json=prevLogIndex,proto3" json:"prev_log_index,omitempty"`
 	PrevLogTerm   uint64                 `protobuf:"varint,4,opt,name=prev_log_term,json=prevLogTerm,proto3" json:"prev_log_term,omitempty"`
-	Entries       []*LogEntry            `protobuf:"bytes,5,rep,name=entries,proto3" json:"entries,omitempty"` // empty = heartbeat
+	Entries       []*LogEntry            `protobuf:"bytes,5,rep,name=entries,proto3" json:"entries,omitempty"` // empty = just a heartbeat
 	LeaderCommit  uint64                 `protobuf:"varint,6,opt,name=leader_commit,json=leaderCommit,proto3" json:"leader_commit,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -617,9 +617,9 @@ type AppendEntriesResponse struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Term    uint64                 `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
 	Success bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"`
-	// Fast backtracking hints (see raft/log.go TODOs) so a leader can
-	// skip straight to the follower's real divergence point instead of
-	// decrementing nextIndex one entry at a time.
+	// conflict_index/conflict_term let the leader jump straight to
+	// where a follower's log actually diverges instead of decrementing
+	// nextIndex one entry at a time - see replicateToPeer in raft/log.go.
 	ConflictIndex uint64 `protobuf:"varint,3,opt,name=conflict_index,json=conflictIndex,proto3" json:"conflict_index,omitempty"`
 	ConflictTerm  uint64 `protobuf:"varint,4,opt,name=conflict_term,json=conflictTerm,proto3" json:"conflict_term,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -690,7 +690,7 @@ type InstallSnapshotRequest struct {
 	LeaderId          string                 `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
 	LastIncludedIndex uint64                 `protobuf:"varint,3,opt,name=last_included_index,json=lastIncludedIndex,proto3" json:"last_included_index,omitempty"`
 	LastIncludedTerm  uint64                 `protobuf:"varint,4,opt,name=last_included_term,json=lastIncludedTerm,proto3" json:"last_included_term,omitempty"`
-	Data              []byte                 `protobuf:"bytes,5,opt,name=data,proto3" json:"data,omitempty"` // full state machine snapshot, sent in one shot
+	Data              []byte                 `protobuf:"bytes,5,opt,name=data,proto3" json:"data,omitempty"` // the whole state machine snapshot, sent in one shot
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }

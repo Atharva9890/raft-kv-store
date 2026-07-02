@@ -1,16 +1,15 @@
 package raft
 
-// Persister abstracts durable storage for the fields Raft must
-// survive a crash/restart with (Raft §5.1, Figure 2): currentTerm,
-// votedFor, and the log. Without this, a restarted node could vote
-// twice in the same term or forget committed entries.
+// anything durable enough to survive a restart has to go through
+// here: currentTerm, votedFor, and the log itself (Figure 2). without
+// this a restarted node could vote twice in a term it already voted
+// in, or forget entries it told a leader it had - both are exactly
+// the kind of bug that only shows up during a real outage.
 //
-// TODO(persistence): the in-memory implementation below (see
-// NewMemoryPersister in raft.go) loses everything on process exit,
-// which is fine for tests but defeats the point of a durable KV
-// store. Swap in a real implementation (e.g. an append-only file with
-// fsync, or BoltDB/SQLite) before the "kill a node, watch it recover
-// its term/vote/log correctly" demo is honest.
+// I've got two implementations: MemoryPersister (persister_memory.go)
+// for tests, and FilePersister (persister_file.go) for anything that
+// needs to survive a process restart, which is the only one that
+// makes the "kill a node, it comes back correctly" demo honest.
 type Persister interface {
 	SaveState(currentTerm uint64, votedFor PeerID, log []LogEntry) error
 	LoadState() (currentTerm uint64, votedFor PeerID, log []LogEntry, err error)
@@ -19,11 +18,12 @@ type Persister interface {
 	LoadSnapshot() (data []byte, lastIncludedIndex, lastIncludedTerm uint64, err error)
 }
 
-// log wraps the entry slice with helpers that account for entries
-// having been compacted away by a snapshot (index 0 of the slice is
-// not necessarily log index 0 - see snapshot.go). Kept deliberately
-// small: the interesting invariants belong in log.go, this just
-// avoids off-by-one bugs being copy-pasted everywhere.
+// small wrapper around the entry slice that hides the index math once
+// a snapshot has chopped off the front of the log. entries[0] is not
+// necessarily log index 0 or even index 1 - it's whatever comes right
+// after lastIncludedIndex. every place that needs to go from "raft
+// index" to "slice index" goes through toArrayIndex so I only had to
+// get the off-by-one right once.
 type log struct {
 	entries           []LogEntry
 	lastIncludedIndex uint64
@@ -34,10 +34,6 @@ func newLog() *log {
 	return &log{entries: make([]LogEntry, 0)}
 }
 
-// toArrayIndex converts a Raft log index into an index into l.entries,
-// accounting for compaction. Returns (idx, true) if the entry is
-// still held in memory, or (0, false) if it was already snapshotted
-// away.
 func (l *log) toArrayIndex(raftIndex uint64) (int, bool) {
 	if raftIndex <= l.lastIncludedIndex {
 		return 0, false
@@ -75,9 +71,9 @@ func (l *log) append(e LogEntry) {
 	l.entries = append(l.entries, e)
 }
 
-// truncateFrom drops all entries at or after raftIndex, used when a
-// leader's AppendEntries reveals that this node has diverging
-// (uncommitted) entries that must be discarded. See log.go TODO.
+// drops everything from raftIndex onward - used when a leader's
+// AppendEntries tells me I've got uncommitted entries that don't
+// match what it actually replicated.
 func (l *log) truncateFrom(raftIndex uint64) {
 	i, ok := l.toArrayIndex(raftIndex)
 	if !ok {

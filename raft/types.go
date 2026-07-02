@@ -2,9 +2,8 @@ package raft
 
 import "time"
 
-// Role is a node's position in the Raft state machine: every node
-// starts a Follower, becomes a Candidate when it stops hearing from a
-// leader, and becomes Leader if it wins an election.
+// the three states a node can be in. everyone starts as a follower,
+// and only moves to candidate/leader through an election.
 type Role int
 
 const (
@@ -26,28 +25,28 @@ func (r Role) String() string {
 	}
 }
 
-// Tuning knobs. The election timeout is randomized per node within
-// [ElectionTimeoutMin, ElectionTimeoutMax) to avoid split votes -
-// see election.go.
+// randomizing the election timeout per node is what stops every
+// follower from timing out at the same instant and splitting the
+// vote every single round. heartbeat needs to be comfortably shorter
+// than the timeout window or leaders will get randomly deposed.
 const (
 	ElectionTimeoutMin = 300 * time.Millisecond
 	ElectionTimeoutMax = 600 * time.Millisecond
 	HeartbeatInterval  = 100 * time.Millisecond
 )
 
-// LogEntry is one entry in the replicated log. Command is an opaque
-// payload interpreted by the StateMachine (server/kv_store.go encodes
-// KV operations into it).
+// one entry in the replicated log. Command is whatever the KV layer
+// encoded (see server/kv_store.go) - raft itself doesn't care what's
+// inside, it just needs to replicate it in order.
 type LogEntry struct {
 	Term    uint64
 	Index   uint64
 	Command []byte
 }
 
-// ApplyMsg is delivered on the node's apply channel once an entry has
-// been committed by a majority of the cluster and is safe to apply to
-// the local state machine. CommandValid distinguishes a normal log
-// entry from a snapshot install.
+// what gets pushed to the state machine once something's actually
+// committed. CommandValid vs SnapshotValid tells the receiver which
+// half of this struct to look at.
 type ApplyMsg struct {
 	CommandValid bool
 	Command      []byte
@@ -60,19 +59,15 @@ type ApplyMsg struct {
 	SnapshotTerm  uint64
 }
 
-// PeerID identifies a cluster member. It must match the id used in
-// the cluster Config and in gRPC dial targets (config/config.go).
+// id of a cluster member - has to match what's in Config.Peers and
+// what config/config.go hands out from the PEERS env var.
 type PeerID string
 
-// Config describes the fixed membership of the cluster this node
-// participates in.
-//
-// TODO(membership-changes): this is a static config loaded at startup.
-// The resume claim is "membership changes" - implementing that means
-// replacing this with joint consensus (Raft §6): a ConfigEntry type
-// committed through the log itself, with old+new config both voting
-// during the transition. Start here once basic election + replication
-// pass their tests.
+// static membership for the cluster this node belongs to, loaded once
+// at startup. I didn't implement live membership changes (adding or
+// removing a node from a running cluster) - that needs joint
+// consensus per §6 of the paper and felt like a separate project on
+// top of getting basic replication right.
 type Config struct {
 	Self  PeerID
 	Peers map[PeerID]string // id -> "host:port"

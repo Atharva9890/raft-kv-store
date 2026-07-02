@@ -2,11 +2,10 @@ package raft
 
 import "errors"
 
-// MemoryPersister is a non-durable Persister: it satisfies the
-// interface so the node can run and be tested, but loses all state on
-// process exit. See the TODO on the Persister interface in state.go -
-// swap this out for a real on-disk implementation before treating
-// crash recovery as anything more than "the process didn't panic."
+// non-durable - loses everything the second the process exits. good
+// enough for tests/harness.go where I want a fresh cluster every run
+// and don't care about surviving a restart. for anything that needs
+// real crash recovery, see FilePersister in persister_file.go.
 type MemoryPersister struct {
 	term     uint64
 	votedFor PeerID

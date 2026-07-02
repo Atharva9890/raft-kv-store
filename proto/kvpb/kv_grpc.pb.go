@@ -28,9 +28,9 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// KV is the client-facing service. Every RPC must be served by the
-// current leader; followers respond with NotLeader so the client can
-// redirect.
+// client-facing service. every RPC has to be served by the current
+// leader - followers reply with not_leader so the client knows to
+// redirect instead of getting a wrong answer.
 type KVClient interface {
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (*GetResponse, error)
 	Put(ctx context.Context, in *PutRequest, opts ...grpc.CallOption) (*PutResponse, error)
@@ -79,9 +79,9 @@ func (c *kVClient) Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.C
 // All implementations must embed UnimplementedKVServer
 // for forward compatibility.
 //
-// KV is the client-facing service. Every RPC must be served by the
-// current leader; followers respond with NotLeader so the client can
-// redirect.
+// client-facing service. every RPC has to be served by the current
+// leader - followers reply with not_leader so the client knows to
+// redirect instead of getting a wrong answer.
 type KVServer interface {
 	Get(context.Context, *GetRequest) (*GetResponse, error)
 	Put(context.Context, *PutRequest) (*PutResponse, error)
@@ -214,8 +214,8 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Raft is the internal server-to-server protocol between cluster
-// members. Clients never call this service directly.
+// internal peer-to-peer protocol between cluster members. clients
+// never call this directly.
 type RaftClient interface {
 	RequestVote(ctx context.Context, in *RequestVoteRequest, opts ...grpc.CallOption) (*RequestVoteResponse, error)
 	AppendEntries(ctx context.Context, in *AppendEntriesRequest, opts ...grpc.CallOption) (*AppendEntriesResponse, error)
@@ -264,8 +264,8 @@ func (c *raftClient) InstallSnapshot(ctx context.Context, in *InstallSnapshotReq
 // All implementations must embed UnimplementedRaftServer
 // for forward compatibility.
 //
-// Raft is the internal server-to-server protocol between cluster
-// members. Clients never call this service directly.
+// internal peer-to-peer protocol between cluster members. clients
+// never call this directly.
 type RaftServer interface {
 	RequestVote(context.Context, *RequestVoteRequest) (*RequestVoteResponse, error)
 	AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error)
