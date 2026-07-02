@@ -81,6 +81,10 @@ docker compose logs -f
 docker compose start <the node the script killed>
 ```
 
+![put/get, kill the leader, watch re-election, read the value back](docs/demo.gif)
+
+(that's a real recording, not staged - `docs/demo.tape` is the exact script if you want to reproduce it with [vhs](https://github.com/charmbracelet/vhs))
+
 Run the actual test suite (this is the thing I run after touching anything in `raft/`):
 
 ```bash
