@@ -1,6 +1,6 @@
-// Command node runs a single raft-kv cluster member: a raft.Node plus
-// the gRPC server exposing both the client-facing KV service and the
-// internal Raft peer service on one listener.
+// this is one cluster member: a raft.Node plus the gRPC server
+// exposing both the client-facing KV service and the internal Raft
+// peer service on the same listener.
 package main
 
 import (
@@ -27,13 +27,17 @@ func main() {
 		addrs[id] = addr
 	}
 	transport := server.NewGRPCTransport(addrs)
-	persister := raft.NewMemoryPersister() // TODO: swap for durable storage, see raft/state.go
+
+	persister, err := raft.NewFilePersister(cfg.DataDir)
+	if err != nil {
+		log.Fatalf("persister: %v", err)
+	}
 
 	applyCh := make(chan raft.ApplyMsg, 256)
 	node := raft.NewNode(cfg.Raft, transport, persister, applyCh)
 
 	sm := server.NewKVStore()
-	kvServer := server.NewServer(node, sm, applyCh)
+	kvServer := server.NewServer(node, sm, cfg.PublicAddrs, applyCh)
 	raftService := server.NewRaftService(node)
 
 	node.Run()
@@ -48,15 +52,15 @@ func main() {
 	kvpb.RegisterKVServer(grpcServer, kvServer)
 	kvpb.RegisterRaftServer(grpcServer, raftService)
 
-	log.Printf("node %s listening on %s (peers: %v)", cfg.Raft.Self, cfg.ListenAddr, cfg.Raft.OtherPeers())
+	log.Printf("node %s listening on %s (peers: %v, data dir: %s)", cfg.Raft.Self, cfg.ListenAddr, cfg.Raft.OtherPeers(), cfg.DataDir)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("serve: %v", err)
 	}
 }
 
-// reportStatus prints role/term changes so `docker compose logs -f`
-// makes the "kill a node, watch re-election" demo visible without
-// attaching a debugger.
+// prints role/term whenever either one changes, so `docker compose
+// logs -f` shows the election happening live without me having to
+// attach a debugger to watch it.
 func reportStatus(node *raft.Node, self raft.PeerID) {
 	var lastTerm uint64
 	var lastLeader bool
