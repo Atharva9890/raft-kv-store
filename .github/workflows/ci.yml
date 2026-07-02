@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: gofmt check
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "the following files aren't gofmt'd:"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: test (race)
+        run: go test ./... -race -count=3 -timeout 180s
