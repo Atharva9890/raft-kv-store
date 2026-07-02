@@ -1,5 +1,8 @@
 # raft-kv-store
 
+[![CI](https://github.com/Atharva9890/raft-kv-store/actions/workflows/ci.yml/badge.svg)](https://github.com/Atharva9890/raft-kv-store/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A distributed key-value store I built from scratch on top of Raft - leader election, log replication, and snapshotting, talking over gRPC, with a 5-node Docker Compose cluster to actually poke at.
 
 I wanted something that would hold up if someone asked me to walk through it in an interview, not a repo where I could wave my hands past the hard part. So this isn't wrapping an existing Raft library - `raft/` is my own implementation of the algorithm, and `tests/` is how I convinced myself it's actually correct rather than "seemed to work when I tried it a couple times."
@@ -84,6 +87,25 @@ Run the actual test suite (this is the thing I run after touching anything in `r
 go test ./tests/... -race -count=5
 ```
 
+## Benchmarks
+
+I used to have a throughput number here with nothing behind it. Not anymore - `bench/main.go` spins up a real 5-node cluster in-process (real gRPC, real `FilePersister` writing JSON to disk on every entry, no batching, one RPC per op) and hammers the leader directly with persistent connections:
+
+```bash
+go run ./bench
+```
+
+What I actually get, 5 runs on my M1 MacBook Air (8GB RAM), 50 concurrent clients, 5 seconds each:
+
+```
+PUT: ~950-1,400 ops/sec
+GET: ~950-1,400 ops/sec  (goes through the same consensus path as writes - see above)
+```
+
+So, roughly **1,000-1,400 ops/sec**, not 100K. I ran the same benchmark against `MemoryPersister` (no disk I/O at all) to see where the time actually goes, and it roughly doubled to ~2,300-3,600 ops/sec - so the JSON-on-every-entry persister is a real, measurable chunk of the cost, not a rounding error. The other big one is architectural: one RPC per write with no batching, which is exactly the thing I called out under "at scale" below. A production system doing both of those - a real WAL instead of rewriting JSON, and batching proposals - would post a meaningfully bigger number. This one doesn't, and I'd rather say that than make something up.
+
+Run it yourself before quoting any of this - it'll depend on your disk and CPU, and a laptop isn't the hardware anyone would actually run this on.
+
 ## How I built this
 
 I went `raft/` first, with an in-memory fake transport in `tests/` before touching gRPC or Docker at all - way faster to iterate on election/replication logic when a whole 5-node test run takes half a second instead of needing containers up. Only once `go test ./tests/...` was passing did I wire up the real gRPC transport and the Compose cluster.
@@ -112,6 +134,7 @@ cmd/kvctl/      CLI client
 config/         cluster membership from env vars
 proto/          gRPC schema + generated code
 tests/          in-memory cluster harness + election/log/partition/failure/snapshot tests
+bench/          throughput benchmark against a real cluster - see Benchmarks below
 docs/           architecture notes, sequence diagrams
 scripts/        kill_leader.sh for the re-election demo
 ```
