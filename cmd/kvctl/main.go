@@ -18,7 +18,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	addrs := strings.Split(envOr("KVCTL_ADDRS", "localhost:9001,localhost:9002,localhost:9003,localhost:9004,localhost:9005"), ",")
+	addrs := strings.Split(envOr("KVCTL_ADDRS", "localhost:9101,localhost:9102,localhost:9103,localhost:9104,localhost:9105"), ",")
 	c := client.New(addrs)
 
 	switch os.Args[1] {
