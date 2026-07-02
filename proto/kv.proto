@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+package kv;
+
+option go_package = "github.com/Atharva9890/raft-kv-store/proto/kvpb";
+
+// KV is the client-facing service. Every RPC must be served by the
+// current leader; followers respond with NotLeader so the client can
+// redirect.
+service KV {
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+}
+
+message GetRequest {
+  string key = 1;
+}
+
+message GetResponse {
+  bool found = 1;
+  string value = 2;
+  string leader_hint = 3; // set when not_leader is true
+  bool not_leader = 4;
+}
+
+message PutRequest {
+  string key = 1;
+  string value = 2;
+}
+
+message PutResponse {
+  bool ok = 1;
+  string leader_hint = 2;
+  bool not_leader = 3;
+}
+
+message DeleteRequest {
+  string key = 1;
+}
+
+message DeleteResponse {
+  bool ok = 1;
+  string leader_hint = 2;
+  bool not_leader = 3;
+}
+
+// Raft is the internal server-to-server protocol between cluster
+// members. Clients never call this service directly.
+service Raft {
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+  rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+}
+
+message RequestVoteRequest {
+  uint64 term = 1;
+  string candidate_id = 2;
+  uint64 last_log_index = 3;
+  uint64 last_log_term = 4;
+}
+
+message RequestVoteResponse {
+  uint64 term = 1;
+  bool vote_granted = 2;
+}
+
+message LogEntry {
+  uint64 term = 1;
+  uint64 index = 2;
+  bytes command = 3; // opaque payload, decoded by the state machine
+}
+
+message AppendEntriesRequest {
+  uint64 term = 1;
+  string leader_id = 2;
+  uint64 prev_log_index = 3;
+  uint64 prev_log_term = 4;
+  repeated LogEntry entries = 5; // empty = heartbeat
+  uint64 leader_commit = 6;
+}
+
+message AppendEntriesResponse {
+  uint64 term = 1;
+  bool success = 2;
+  // Fast backtracking hints (see raft/log.go TODOs) so a leader can
+  // skip straight to the follower's real divergence point instead of
+  // decrementing nextIndex one entry at a time.
+  uint64 conflict_index = 3;
+  uint64 conflict_term = 4;
+}
+
+message InstallSnapshotRequest {
+  uint64 term = 1;
+  string leader_id = 2;
+  uint64 last_included_index = 3;
+  uint64 last_included_term = 4;
+  bytes data = 5; // full state machine snapshot, sent in one shot
+}
+
+message InstallSnapshotResponse {
+  uint64 term = 1;
+}
