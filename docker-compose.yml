@@ -1,0 +1,39 @@
+x-peers: &peers
+  PEERS: "node1=node1:9001,node2=node2:9001,node3=node3:9001,node4=node4:9001,node5=node5:9001"
+  LISTEN_ADDR: ":9001"
+
+services:
+  node1:
+    build: .
+    environment:
+      <<: *peers
+      NODE_ID: node1
+    ports: ["9101:9001"]
+
+  node2:
+    build: .
+    environment:
+      <<: *peers
+      NODE_ID: node2
+    ports: ["9102:9001"]
+
+  node3:
+    build: .
+    environment:
+      <<: *peers
+      NODE_ID: node3
+    ports: ["9103:9001"]
+
+  node4:
+    build: .
+    environment:
+      <<: *peers
+      NODE_ID: node4
+    ports: ["9104:9001"]
+
+  node5:
+    build: .
+    environment:
+      <<: *peers
+      NODE_ID: node5
+    ports: ["9105:9001"]
